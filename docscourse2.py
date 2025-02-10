@@ -66,8 +66,8 @@ def summarize_each_page(all_pages):
         summaries[url] = summary
     return summaries
 
-def generate_course_transcript(all_pages):
-    """Creates a structured course transcript using summarized page content."""
+def generate_course_lessons(all_pages):
+    """Creates structured course lessons using summarized page content."""
     summaries = summarize_each_page(all_pages)
     content_summary = "\n\n".join([f"Page: {url}\nSummary: {summary}" for url, summary in summaries.items()])
     
@@ -75,27 +75,25 @@ def generate_course_transcript(all_pages):
     You are an AI that creates structured educational courses. Given the following summarized documentation:
     {content_summary}
     
-    Please generate a structured course transcript with clear lessons.
-    """
-    
-    return llm.invoke(prompt).content
-
-def save_lessons(all_pages):
-    """Saves each page content into lesson files based on logical grouping."""
-    transcript = generate_course_transcript(all_pages)
-    lesson_mapping = llm.invoke(f"""Organize these lessons into sequential order and determine lesson groupings:
-    {transcript}
-    Return a structured list in the format:
+    Please generate structured lessons, logically dividing topics into separate lessons.
+    Format the output as follows:
     Lesson1: [URLs...]
     Lesson2: [URLs...]
-    """).content
+    """
     
+    lesson_mapping = llm.invoke(prompt).content
     lessons = {}
     for line in lesson_mapping.split("\n"):
         if line.startswith("Lesson"):
             lesson_name, urls = line.split(":")
             urls = urls.strip().strip("[]").split(", ")
             lessons[lesson_name] = urls
+    
+    return lessons
+
+def save_lessons(all_pages):
+    """Saves each lesson as a separate file based on logical grouping."""
+    lessons = generate_course_lessons(all_pages)
     
     for lesson, urls in lessons.items():
         content = "\n\n".join([f"Page: {url}\n{all_pages.get(url, '')}" for url in urls])
@@ -114,10 +112,10 @@ def main():
         print(f"Scraping: {link}")
         all_pages[link] = fetch_page_content(link)
     
-    print("Generating and saving course transcript...")
+    print("Generating and saving structured lessons...")
     save_lessons(all_pages)
     
-    print("All lessons and summaries saved.")
+    print("All lessons saved as separate files.")
 
 if __name__ == "__main__":
     main()
