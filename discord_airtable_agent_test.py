@@ -5,6 +5,9 @@ import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional
+import asyncio
+import discord
+from discord.ext import commands
 
 # Import LangChain components.
 from langchain import hub
@@ -23,6 +26,7 @@ load_dotenv()
 OPEN_AI_API_KEY = os.getenv("OPEN_AI_API_KEY")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_CLIENT_SECRET = os.getenv("AIRTABLE_CLIENT_SECRET")  # May be None
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 BASE_URL = "https://api.airtable.com/v0"
 META_URL = "https://api.airtable.com/v0/meta"
@@ -49,6 +53,7 @@ def resolve_base_id(base_identifier: str) -> Optional[str]:
     if base_identifier.startswith("app"):
         RESOLVED_BASE_ID = base_identifier
         return base_identifier
+    # If already resolved, simply return it.
     if RESOLVED_BASE_ID and base_identifier.lower() in RESOLVED_BASE_ID.lower():
         return RESOLVED_BASE_ID
     url = f"{META_URL}/bases"
@@ -153,7 +158,7 @@ class FilterRecordsInput(BaseModel):
     filter_value: str
     fields: Optional[List[str]] = None
 
-# --- New Models for Bulk and Other Endpoints ---
+# New models for bulk operations and other endpoints
 
 class UpdateMultipleRecordsInput(BaseModel):
     base_id: str
@@ -738,13 +743,35 @@ agent_executor = AgentExecutor.from_agent_and_tools(
     handle_parsing_errors=True,
 )
 
-print("Welcome to the Airtable Agent. Type 'exit' to quit.")
-while True:
-    user_input = input("User: ")
-    if user_input.lower() == "exit":
-        break
-    memory.chat_memory.add_message(HumanMessage(content=user_input))
-    result = agent_executor.invoke({"input": user_input})
-    output = result.get("output", "")
-    print("Bot:", output)
-    memory.chat_memory.add_message(AIMessage(content=output))
+# =============================================================================
+# Discord Bot Integration
+# =============================================================================
+
+bot = commands.Bot(command_prefix="!")
+
+@bot.event
+async def on_ready():
+    print(f"{bot.user} is now online!")
+
+@bot.command(name="airtable")
+async def airtable(ctx, *, query: str):
+    """
+    This command passes the user's query to the Airtable agent and sends the response.
+    Usage: !airtable <your query here>
+    """
+    loop = asyncio.get_running_loop()
+    # Run the agent's invoke method in an executor to avoid blocking the Discord event loop.
+    response = await loop.run_in_executor(None, agent_executor.invoke, {"input": query})
+    output = response.get("output", "No output returned.")
+    # If the response is too long for one message, split it into chunks.
+    for chunk in [output[i:i+1900] for i in range(0, len(output), 1900)]:
+        await ctx.send(chunk)
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+if __name__ == "__main__":
+    print("Welcome to the Airtable Agent. Type 'exit' to quit or use the Discord bot.")
+    # Run the Discord bot
+    bot.run(DISCORD_BOT_TOKEN)
