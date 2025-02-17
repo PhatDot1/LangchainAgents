@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+# switch this one to claude to get around text limits.
 """
 Full code for a course content generator tool.
 
@@ -7,7 +7,7 @@ This script:
  - Summarizes each page to reduce content size.
  - Batches the summaries to remain under token limits.
  - Uses an LLM (GPT-4 via LangChain) to generate structured course lessons.
- - Saves each lesson as a text file in your current working directory.
+ - Saves the generated curriculum as text file(s) in your current working directory.
  - Wraps all of the above as a LangChain Tool so that an agent can be created,
    and you can simply type queries like:
       "Give me a course content covering: https://docs.anchorprotocol.com, https://docs.solana.com"
@@ -146,116 +146,114 @@ def dynamic_batching(summaries):
         batches.append(current_batch)
     return batches
 
-def generate_course_lessons(all_pages):
+# ------------------------
+# New Curriculum Synthesis Functions
+# ------------------------
+
+def dynamic_batching_entries(all_pages, summaries):
     """
-    Generates structured course lessons from the summarized page content.
-    The output is expected to follow a format where each lesson starts with a header (e.g., "Lesson1: ...")
-    followed by bullet points (lines starting with "-") that list URLs.
+    Creates entries combining a truncated raw excerpt (first 500 characters)
+    and the summary for each URL, and then batches these entries such that each batch is under token limits.
+    """
+    entries = []
+    for url in summaries:
+        summary = summaries[url]
+        summary_text = " ".join(summary) if isinstance(summary, list) else summary
+        raw_content = all_pages.get(url, "")
+        raw_excerpt = raw_content[:500]  # truncate to 500 characters to save tokens
+        entry = f"URL: {url}\nRaw Excerpt: {raw_excerpt}\nSummary: {summary_text}"
+        entries.append(entry)
+    batches = []
+    current_batch = []
+    current_tokens = 0
+    for entry in entries:
+        entry_tokens = count_tokens(entry)
+        if current_tokens + entry_tokens > SAFE_LIMIT:
+            batches.append("\n\n".join(current_batch))
+            current_batch = [entry]
+            current_tokens = entry_tokens
+        else:
+            current_batch.append(entry)
+            current_tokens += entry_tokens
+    if current_batch:
+        batches.append("\n\n".join(current_batch))
+    return batches
+
+def generate_course_curriculum(all_pages):
+    """
+    Generates a comprehensive course curriculum by synthesizing both the raw page content and the summaries.
+    The curriculum is divided into chapters/lessons. For each chapter, include:
+      - A clear title
+      - An introduction outlining key concepts and learning objectives
+      - Detailed lesson content that accurately explains technical details (quoting raw content as needed)
+      - A summary of key takeaways
+      - Optional further resources or suggested readings
     """
     summaries = summarize_each_page(all_pages)
-    batches = dynamic_batching(summaries)
-    lessons = {}
-
-    for batch in batches:
-        batch_summaries = {}
-        for url_tuple in batch:
-            url = url_tuple[0]
-            if url in summaries:
-                batch_summaries[url] = summaries[url]
-            else:
-                print(f"⚠ Warning: URL {url} is missing from summaries. Skipping...")
-                continue
-
-        if not batch_summaries:
-            continue
-
-        content_summary = "\n\n".join(
-            [f"Page: {url}\nSummary: {summary}" for url, summary in batch_summaries.items()]
-        )
-
-        # Instruct the LLM to output lessons with bullet points starting with '-' for each URL.
+    entry_batches = dynamic_batching_entries(all_pages, summaries)
+    curriculum_parts = []
+    
+    for batch_info in entry_batches:
         prompt = f"""
-You are an AI that creates structured educational courses. Given the following summarized documentation:
-{content_summary}
+You are an expert educator and curriculum designer. Using the following source information from documentation (which includes both raw excerpts and summaries), synthesize a comprehensive and original course curriculum. The curriculum should be divided into chapters or lessons. For each chapter, include:
+- A clear title
+- An introduction outlining key concepts and learning objectives
+- Detailed lesson content that accurately explains technical details (quoting raw content as needed)
+- A summary of key takeaways
+- Optional further resources or suggested readings
 
-Please generate structured lessons, logically dividing topics into separate lessons.
-Format the output as follows:
-Lesson1: [Optional title or description]
-- https://URL1
-- https://URL2
+Source Material:
+{batch_info}
 
-Lesson2: [Optional title or description]
-- https://URL3
-- https://URL4
+Course Curriculum:
 """
-        lesson_mapping = llm.invoke(prompt).content
-        print(f"📝 Raw LLM Output:\n{lesson_mapping}")
+        curriculum_part = llm.invoke(prompt).content
+        curriculum_parts.append(curriculum_part)
+    
+    final_curriculum = "\n\n".join(curriculum_parts)
+    return final_curriculum
 
-        # Parse the output manually line-by-line.
-        extracted_lessons = {}
-        current_lesson = None
-        for line in lesson_mapping.splitlines():
-            line = line.strip()
-            if line.lower().startswith("lesson"):
-                # Create a new lesson identifier (e.g., "Lesson1")
-                parts = line.split(":", 1)
-                lesson_id = parts[0].replace(" ", "")
-                current_lesson = lesson_id
-                extracted_lessons[current_lesson] = []
-            elif line.startswith("-") and current_lesson is not None:
-                url_candidate = line.lstrip("-").strip()
-                # Check if the candidate looks like a URL and is present in all_pages.
-                if url_candidate.startswith("http") and url_candidate in all_pages:
-                    extracted_lessons[current_lesson].append(url_candidate)
-        # Merge the extracted lessons into our lessons dictionary.
-        for lesson_name, urls in extracted_lessons.items():
-            if lesson_name in lessons:
-                lessons[lesson_name].extend(urls)
-            else:
-                lessons[lesson_name] = urls
-
-    return lessons
-
-def save_lessons(all_pages):
+def save_curriculum(all_pages):
     """
-    Saves each lesson as a text file in the current working directory.
-    If a lesson's content is too large, it is split into multiple files.
+    Generates the full course curriculum and saves it as text file(s) in the current working directory.
+    If the curriculum is too large, it is split into multiple files.
     """
-    lessons = generate_course_lessons(all_pages)
-    for lesson, urls in lessons.items():
-        content = "\n\n".join([f"Page: {url}\n{all_pages.get(url, '')}" for url in urls])
-        if count_tokens(content) > SAFE_LIMIT:
-            print(f"⚠️ Lesson {lesson} is too large, splitting into multiple pages...")
-            split_content = []
-            words = content.split()
-            part = []
-            for word in words:
-                part.append(word)
-                if count_tokens(" ".join(part)) >= SAFE_LIMIT:
-                    split_content.append(" ".join(part))
-                    part = []
-            if part:
+    curriculum = generate_course_curriculum(all_pages)
+    if count_tokens(curriculum) > SAFE_LIMIT:
+        print("⚠️ Curriculum is too large, splitting into multiple files...")
+        split_content = []
+        words = curriculum.split()
+        part = []
+        for word in words:
+            part.append(word)
+            if count_tokens(" ".join(part)) >= SAFE_LIMIT:
                 split_content.append(" ".join(part))
-
-            for i, part_content in enumerate(split_content):
-                file_name = f"{lesson}-page{i+1}.txt"
-                file_path = os.path.join(os.getcwd(), file_name)
-                print(f"✅ Saving {file_path}...")
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(part_content)
-        else:
-            file_name = f"{lesson}.txt"
+                part = []
+        if part:
+            split_content.append(" ".join(part))
+        for i, part_content in enumerate(split_content):
+            file_name = f"Course_Curriculum_part{i+1}.txt"
             file_path = os.path.join(os.getcwd(), file_name)
             print(f"✅ Saving {file_path}...")
             with open(file_path, "w", encoding="utf-8") as f:
-                f.write(content)
+                f.write(part_content)
+    else:
+        file_name = "Course_Curriculum.txt"
+        file_path = os.path.join(os.getcwd(), file_name)
+        print(f"✅ Saving {file_path}...")
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(curriculum)
+
+# ------------------------
+# Updated Course Generation Function
+# ------------------------
 
 def generate_course_from_links(links_input: str):
     """
     Given a comma-separated list of documentation URLs, this function:
       - Scrapes all pages (recursively) from each base URL.
-      - Generates course lessons.
-      - Saves the lessons as text files in the current directory.
+      - Synthesizes a comprehensive course curriculum using both raw page content and summaries.
+      - Saves the curriculum as text file(s) in the current directory.
     Returns a message indicating where the files were saved.
     """
     urls = [link.strip() for link in links_input.split(",") if link.strip()]
@@ -267,9 +265,9 @@ def generate_course_from_links(links_input: str):
         for link in all_links:
             print(f"📝 Scraping: {link}")
             all_pages[link] = fetch_page_content(link)
-    print("📚 Generating and saving structured lessons...")
-    save_lessons(all_pages)
-    return f"Course content generated and saved in {os.getcwd()}."
+    print("📚 Generating and saving the course curriculum...")
+    save_curriculum(all_pages)
+    return f"Course curriculum generated and saved in {os.getcwd()}."
 
 # ------------------------
 # LangChain Tool & Agent Setup

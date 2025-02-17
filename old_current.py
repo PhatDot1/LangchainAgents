@@ -114,6 +114,12 @@ def extract_events(fields, keywords, exclusive=False):
             cleaned = clean_programme_name(value_str)
             date_info = extract_quarter_info(value_str)
             events.append((key, cleaned, date_info))
+    if len(events) > 2:
+        selected = select_relevant_events(events, " ".join(keywords))
+        if selected:
+            events = [events[i] for i in selected if i < len(events)]
+        else:
+            events = events[:2]
     return events
 
 # === Email Request Detection Helpers ===
@@ -139,7 +145,6 @@ def generate_subject_line(record):
     Generates a concise subject line based on the record's context.
     The programme is taken from the Website URL for programme info.
     """
-    # Exclude record IDs from the context.
     control_fields = {"AI Prompt", "AI Description Destination Field", "AI Description Generator", "Full Record ID"}
     context_data = "\n".join(f"{key}: {ensure_string(value)}" 
                              for key, value in record.get("fields", {}).items() 
@@ -168,8 +173,8 @@ Return only the subject line.
 def generic_response(record, user_prompt):
     """
     For non-email requests, generates a generic response using the record's context.
+    Additionally, if the user's prompt contains any URLs, scrape them and append that information.
     """
-    # Exclude record IDs
     control_fields = {"AI Prompt", "AI Description Destination Field", "AI Description Generator", "Full Record ID"}
     context_data = "\n".join(f"{key}: {ensure_string(value)}" 
                              for key, value in record.get("fields", {}).items() 
@@ -180,6 +185,17 @@ def generic_response(record, user_prompt):
 Answer the following question:
 {user_prompt}
 """
+    # Extract any URLs from the user's prompt
+    urls_in_prompt = re.findall(r'(https?://\S+)', user_prompt)
+    if urls_in_prompt:
+        extra_scraped = ""
+        for url in urls_in_prompt:
+            if "github.com" in url:
+                extra_scraped += f"\n[GitHub info for {url}]:\n{fetch_github_info(url)}\n"
+            else:
+                extra_scraped += f"\n[Website info for {url}]:\n{fetch_page_content(url)}\n"
+        prompt_text += "\nAdditional Scraped Information from provided links:" + extra_scraped
+
     log("Sending generic response prompt to LLM:")
     log(prompt_text)
     response = llm_chain([
@@ -250,8 +266,8 @@ def fetch_programme_info(url):
         elements = soup.find_all(["h1", "h2", "h3", "p"])
         texts = [el.get_text(strip=True) for el in elements if el.get_text(strip=True)]
         content = "\n".join(texts)
-        if len(content) > 1000:
-            content = content[:1000] + "..."
+        if len(content) > 3000:
+            content = content[:3000] + "..."
         return content
     except Exception as e:
         return f"Failed to fetch programme info from {url}: {str(e)}"
@@ -523,11 +539,8 @@ def fill_in_blank_template(record):
     fields = record.get("fields", {})
     ai_prompt = ensure_string(fields.get("AI Prompt", ""))
     template = extract_email_template(ai_prompt)
-    # Exclude record IDs from context.
     control_fields = {"AI Prompt", "AI Description Destination Field", "AI Description Generator", "Full Record ID"}
-    context_data = "\n".join(f"{key}: {ensure_string(value)}" 
-                             for key, value in fields.items() 
-                             if key not in control_fields)
+    context_data = "\n".join(f"{key}: {ensure_string(value)}" for key, value in fields.items() if key not in control_fields)
     extra_info = ""
     for key, value in fields.items():
         if key not in control_fields and isinstance(value, str):
@@ -692,6 +705,7 @@ def email_gospel_tool(user_input: str) -> str:
     Generate an email invitation exactly as specified by the user's instructions while incorporating the record's context.
     Ensure that any programme names in the output are cleaned and that the targeted programme is determined
     solely from the Website URL for programme info field. Do not include a subject line.
+    Additionally, if the user's instructions mention including GitHub info, incorporate that as well.
     """
     # Remove "GOD:" prefix from the user's input.
     gospel_instructions = user_input[4:].strip() if user_input.strip().upper().startswith("GOD:") else user_input
@@ -711,15 +725,20 @@ def email_gospel_tool(user_input: str) -> str:
         if key not in control_fields
     )
 
-    # Execute scrape_programme_url_field to get the scraped programme details.
-    scraped_programme_info = scrape_programme_url_field(record)
-    target_programme = clean_programme_name(scraped_programme_info)
+    # Scrape programme info from the Website URL for programme info field and clean it.
+    raw_programme_info = scrape_programme_url_field(record)
+    target_programme = clean_programme_name(raw_programme_info)
     if not target_programme:
         target_programme = "the programme"
 
-    # Include the full scraped details in the prompt.
-    scraped_details = scraped_programme_info if scraped_programme_info else "No additional details available."
+    # Check if the user's instructions mention GitHub info.
+    github_info = ""
+    if "github" in gospel_instructions.lower():
+        github_field = fields.get("Github")
+        if github_field:
+            github_info = fetch_github_info(ensure_string(github_field))
 
+    # Build additional instructions.
     gospel_extra = (
         "IMPORTANT: When referencing programme names, remove any codes in square brackets, "
         "any quarter/year indicators (e.g., '24Q3', '25Q1'), any time information, and any trailing three-letter month abbreviations "
@@ -728,15 +747,17 @@ def email_gospel_tool(user_input: str) -> str:
     )
     gospel_subject = "Do not include any subject line in the output."
 
+    # Construct the final prompt.
     prompt_text = f"""You are a strict email generator that follows user gospel instructions exactly.
 User Gospel Instructions:
 {gospel_instructions}
 
 The targeted programme, determined from the Website URL for programme info, is: "{target_programme}".
-Scraped Programme Details:
-{scraped_details}
 Website URL: {get_signup_link_from_record(record)}
-
+"""
+    if github_info:
+        prompt_text += f"\nInclude the following GitHub information for the user:\n{github_info}\n"
+    prompt_text += f"""
 Using the following record context for personalization:
 {context_data}
 
@@ -945,7 +966,7 @@ if __name__ == "__main__":
                 continue
             try:
                 log(f"Processing record {record_id} using its stored AI Prompt.")
-                # Check if the prompt starts with "GOD:" and call email_gospel_tool explicitly.
+                # If the AI prompt starts with "GOD:", explicitly call the gospel tool.
                 if ai_prompt.strip().upper().startswith("GOD:"):
                     final_output = email_gospel_tool(ai_prompt)
                 else:
